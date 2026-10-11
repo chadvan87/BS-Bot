@@ -17,6 +17,7 @@ from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from app import db
 from app.services.chart_service import generate_signal_chart
 from app.services.post_templates import PostTemplateEngine
 
@@ -66,48 +67,12 @@ def now_iso() -> str:
     return datetime.now(TZ).isoformat(timespec="seconds")
 
 
-def conn() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(DB_PATH)
-    c.row_factory = sqlite3.Row
-    return c
+def conn():
+    return db.connect(DB_PATH)
 
 
 def init_db() -> None:
-    with conn() as c:
-        c.executescript("""
-        CREATE TABLE IF NOT EXISTS signals (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          symbol TEXT NOT NULL, side TEXT NOT NULL, timeframe TEXT NOT NULL,
-          entry_low REAL, entry_high REAL, stop_loss REAL,
-          tp1 REAL, tp2 REAL, tp3 REAL, score INTEGER,
-          reason TEXT, status TEXT DEFAULT 'NEW', created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS posts (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          signal_id INTEGER, title TEXT, content TEXT NOT NULL,
-          status TEXT DEFAULT 'DRAFT', scheduled_at TEXT,
-          published_at TEXT, publish_result TEXT, created_at TEXT NOT NULL,
-          chart_path TEXT
-        );
-        CREATE TABLE IF NOT EXISTS settings (
-          key TEXT PRIMARY KEY, value TEXT NOT NULL
-        );
-        """)
-        signal_cols = {r["name"] for r in c.execute("PRAGMA table_info(signals)")}
-        for col in ("price", "ema20", "ema50", "ema200", "rsi", "atr", "volume_ratio", "support", "resistance"):
-            if col not in signal_cols:
-                c.execute(f"ALTER TABLE signals ADD COLUMN {col} REAL")
-        post_cols = {r["name"] for r in c.execute("PRAGMA table_info(posts)")}
-        if "chart_path" not in post_cols:
-            c.execute("ALTER TABLE posts ADD COLUMN chart_path TEXT")
-        if "template_name" not in post_cols:
-            c.execute("ALTER TABLE posts ADD COLUMN template_name TEXT")
-        if "delete_after_publish" not in post_cols:
-            c.execute("ALTER TABLE posts ADD COLUMN delete_after_publish INTEGER DEFAULT 0")
-        c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('PUBLISH_MODE','mock')")
-        c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('MIN_SPACING_MINUTES','20')")
-        c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('DAILY_SOFT_LIMIT','40')")
+    db.init_schema(DB_PATH)
 
 
 def get_setting(key: str, default: str = "") -> str:

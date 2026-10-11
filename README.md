@@ -54,6 +54,7 @@ Deployed as a Docker web service via `render.yaml` (Python 3.12 + Node 22). Requ
 | `APP_PASSWORD` | Enables HTTP Basic auth on every page/API (except `/healthz`). **Required on a public host.** |
 | `APP_USERNAME` | Basic auth username (default `admin`). |
 | `DATA_DIR` | Where the SQLite DB and charts live. On Render: the persistent disk mount, `/var/data`. |
+| `DATABASE_URL` | Optional. A Postgres URL (e.g. Supabase's **Session pooler** string). When set, signals/posts/settings are stored there instead of SQLite, so they survive restarts on Render's free plan. Charts still live in `DATA_DIR`. |
 
-The Binance Square OpenAPI key is still entered in the UI and stored in SQLite on the disk — not as an env var.
+The Binance Square OpenAPI key is still entered in the UI and stored in the database (SQLite or Postgres) — not as an env var.
 Run a single instance/worker only: the scheduler lives in-process.

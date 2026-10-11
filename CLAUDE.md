@@ -5,7 +5,7 @@ app itself no longer calls Claude Code or any LLM at runtime — post copy is ge
 a deterministic Python template engine (see `app/services/post_templates.py`).
 
 ## Architecture
-- FastAPI + SQLite + vanilla HTML/JS.
+- FastAPI + SQLite (or Postgres/Supabase when `DATABASE_URL` is set, see `app/db.py`) + vanilla HTML/JS.
 - Python scans market data, manages drafts/scheduling, and generates post copy and charts.
 - `app/services/post_templates.py` — `PostTemplateEngine`, 18 deterministic post styles
   (no AI, no network calls). Auto-selects a style from signal data (side, RSI, score,
@@ -21,8 +21,8 @@ a deterministic Python template engine (see `app/services/post_templates.py`).
 
 ## Authentication
 - UI accepts one Binance Square OpenAPI key.
-- Key is stored locally in SQLite setting `BINANCE_SQUARE_OPENAPI_KEY`.
-- Every publish reads the latest key from SQLite and injects it only into the subprocess environment.
+- Key is stored in the database setting `BINANCE_SQUARE_OPENAPI_KEY` (SQLite locally, Postgres if `DATABASE_URL` is set).
+- Every publish reads the latest key from the database and injects it only into the subprocess environment.
 - Never put the key in CLI args, URLs, logs, API responses, HTML, README, or source.
 
 ## Official posting command

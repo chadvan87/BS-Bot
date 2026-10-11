@@ -21,3 +21,5 @@ services:
         value: admin
       - key: APP_PASSWORD
         sync: false # prompted in the Render dashboard on first Blueprint sync
+      - key: DATABASE_URL
+        sync: false # optional: Supabase Session pooler URL; leave empty to use SQLite on the disk

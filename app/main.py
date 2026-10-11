@@ -141,6 +141,11 @@ class ScanRequest(BaseModel):
     bullish_only: bool = False
 
 
+class DiscoverRequest(BaseModel):
+    limit: int = 30
+    hours: int = 4
+
+
 class GenerateRequest(BaseModel):
     signal_id: int
     template_name: str = "auto"
@@ -185,6 +190,52 @@ async def fetch_klines(symbol: str, interval: str, limit: int = 220) -> list[lis
         r = await client.get("https://fapi.binance.com/fapi/v1/klines", params={"symbol": symbol, "interval": interval, "limit": limit})
         r.raise_for_status()
         return r.json()
+
+
+# OI discovery: rank the most-traded USDT perpetuals by open-interest growth.
+OI_CANDIDATES = 150
+OI_MIN_QUOTE_VOLUME = 5_000_000  # 24h USDT volume; skips illiquid contracts
+OI_CONCURRENCY = 15
+
+
+async def discover_oi_movers(limit: int, hours: int) -> list[dict[str, Any]]:
+    async with httpx.AsyncClient(timeout=15, base_url="https://fapi.binance.com") as client:
+        info_r, tickers_r = await asyncio.gather(client.get("/fapi/v1/exchangeInfo"), client.get("/fapi/v1/ticker/24hr"))
+        info_r.raise_for_status()
+        tickers_r.raise_for_status()
+        perps = {
+            s["symbol"] for s in info_r.json()["symbols"]
+            if s.get("contractType") == "PERPETUAL" and s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING"
+        }
+        tickers = [t for t in tickers_r.json() if t["symbol"] in perps and float(t["quoteVolume"]) >= OI_MIN_QUOTE_VOLUME]
+        tickers.sort(key=lambda t: float(t["quoteVolume"]), reverse=True)
+        tickers = tickers[:OI_CANDIDATES]
+        sem = asyncio.Semaphore(OI_CONCURRENCY)
+
+        async def oi_change(t: dict[str, Any]) -> dict[str, Any] | None:
+            async with sem:
+                try:
+                    r = await client.get("/futures/data/openInterestHist", params={"symbol": t["symbol"], "period": "1h", "limit": hours + 1})
+                    r.raise_for_status()
+                    hist = r.json()
+                except (httpx.HTTPError, ValueError):
+                    return None
+            if len(hist) < 2:
+                return None
+            first, last = float(hist[0]["sumOpenInterestValue"]), float(hist[-1]["sumOpenInterestValue"])
+            if first <= 0:
+                return None
+            return {
+                "symbol": t["symbol"],
+                "oi_change_pct": round((last / first - 1) * 100, 2),
+                "oi_value": round(last),
+                "price_change_24h_pct": round(float(t["priceChangePercent"]), 2),
+                "quote_volume_24h": round(float(t["quoteVolume"])),
+            }
+
+        rows = [r for r in await asyncio.gather(*(oi_change(t) for t in tickers)) if r]
+    rows.sort(key=lambda r: r["oi_change_pct"], reverse=True)
+    return rows[:limit]
 
 
 async def fetch_price(symbol: str) -> float:
@@ -519,13 +570,33 @@ def test_square() -> dict[str, Any]:
     return {"ok": True, "message": "Ready to post. This check does not publish anything.", "config": cfg}
 
 
+@app.post("/api/discover")
+async def discover(req: DiscoverRequest) -> dict[str, Any]:
+    limit = max(1, min(req.limit, 100))
+    hours = max(1, min(req.hours, 24))
+    try:
+        movers = await discover_oi_movers(limit, hours)
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"Binance request failed: {exc}")
+    return {"symbols": [m["symbol"] for m in movers], "movers": movers, "hours": hours}
+
+
 @app.post("/api/scan")
 async def scan(req: ScanRequest) -> dict[str, Any]:
+    symbols = list(dict.fromkeys(raw.upper().replace("/", "").strip() for raw in req.symbols if raw.strip()))
+    sem = asyncio.Semaphore(10)
+
+    async def klines(symbol: str) -> list[list[Any]]:
+        async with sem:
+            return await fetch_klines(symbol, req.interval)
+
+    fetched = await asyncio.gather(*(klines(sym) for sym in symbols), return_exceptions=True)
     results, errors = [], []
-    for raw in req.symbols:
-        symbol = raw.upper().replace("/", "").strip()
+    for symbol, rows in zip(symbols, fetched):
         try:
-            sig = analyze(symbol, req.interval, await fetch_klines(symbol, req.interval))
+            if isinstance(rows, BaseException):
+                raise rows
+            sig = analyze(symbol, req.interval, rows)
             if req.bullish_only and sig["side"] != "LONG":
                 continue
             with conn() as c:

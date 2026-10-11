@@ -45,6 +45,16 @@
   <div class="panel-head"><span class="step">Step 2</span><h2>Scan signals</h2></div>
   <p>Pulls live klines from Binance Futures and scores LONG/SHORT setups from EMA, RSI, ATR and volume.</p>
   <div class="row" style="margin-top:14px">
+    <label class="field">Coins<select id="oiCount">
+      <option>30</option><option>40</option><option>50</option><option>60</option><option>80</option><option>100</option>
+    </select></label>
+    <label class="field">OI window<select id="oiHours">
+      <option value="1">1h</option><option value="4" selected>4h</option><option value="12">12h</option><option value="24">24h</option>
+    </select></label>
+    <button id="oiScan" class="primary">🔥 Scan top OI gainers</button>
+  </div>
+  <div id="scanStatus" class="generate-status" hidden></div>
+  <div class="row">
     <input id="symbols" value="BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,LINKUSDT">
     <select id="interval"><option>15m</option><option selected>1h</option><option>4h</option></select>
     <label class="check"><input id="bullish" type="checkbox"> 🐂 Bullish only</label>

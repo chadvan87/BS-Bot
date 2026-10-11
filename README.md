@@ -32,6 +32,9 @@ Every generated draft also gets a dark-theme candlestick chart (`app/services/ch
 with EMA20/50/200, volume and RSI panels, entry zone, SL/TP lines, and support/resistance —
 published via Binance's official `post-image.mjs` instead of text-only when a chart is attached.
 
+**🔥 Scan top OI gainers** fills the symbol list with the 30–100 USDT perpetuals (from the 150 most-traded)
+whose open interest grew most over the chosen window (1h/4h/12h/24h), then scans them.
+
 **Generate BTC Market Analysis** and **Generate Top 10 Watchlist** are dedicated buttons for
 BTC-specific and multi-signal round-up posts. **Refresh status** on a signal checks the live
 price against its entry/SL/TP levels (`ENTRY_TRIGGERED`, `TP1_HIT`, `SL_HIT`, `INVALIDATED`, ...),

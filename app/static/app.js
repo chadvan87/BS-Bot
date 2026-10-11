@@ -80,7 +80,7 @@ $('#symbols').value=d.symbols.join(',')
 const top=d.movers.slice(0,3).map(m=>`${m.symbol} ${m.oi_change_pct>0?'+':''}${m.oi_change_pct}%`).join(', ')
 setScanStatus(`Found ${d.symbols.length} coins (top: ${top}). Scanning…`)
 const r=await runScan();await load()
-setScanStatus(`Scanned ${d.symbols.length} OI gainers → ${r.results.length} signal${r.results.length===1?'':'s'} added${r.errors.length?`, ${r.errors.length} skipped`:''}.`,'success')}
+setScanStatus(`Scanned ${d.symbols.length} OI gainers → ${r.results.length} signal${r.results.length===1?'':'s'} added${r.errors.length?`. Skipped: ${r.errors[0]}${r.errors.length>1?` (+${r.errors.length-1} more)`:''}`:''}.`,r.errors.length?'':'success')}
 catch(x){setScanStatus(`OI scan failed: ${x.message}`,'error')}finally{btn.disabled=false}}
 
 window.refreshStatus=async id=>{try{const d=await api(`/api/signals/${id}/refresh-status`,{method:'POST'});await load()}catch(x){alert(x.message)}};

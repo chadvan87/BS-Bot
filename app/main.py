@@ -7,13 +7,14 @@ import secrets
 import shutil
 import sqlite3
 import subprocess
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import httpx
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -185,39 +186,80 @@ class PostIdsRequest(BaseModel):
     post_ids: list[int] = []
 
 
+FAPI = "https://fapi.binance.com"
+
+
+class BinanceRateLimited(Exception):
+    """Binance answered 429/418 for this server's IP; calls are paused until Retry-After passes."""
+
+
+# Binance escalates 429 (slow down) to 418 (IP ban, 2 minutes up to 3 days) when requests keep
+# coming. After either, stop calling Binance from this process until Retry-After has passed.
+_binance_paused_until = 0.0
+
+
+async def binance_get(client: httpx.AsyncClient, url: str, params: dict[str, Any] | None = None) -> Any:
+    global _binance_paused_until
+    wait = _binance_paused_until - time.monotonic()
+    if wait > 0:
+        raise BinanceRateLimited(f"Binance rate limit: requests paused for {int(wait) + 1}s more to avoid an IP ban.")
+    r = await client.get(url, params=params)
+    if r.status_code in (418, 429):
+        retry = int(r.headers.get("retry-after") or 60)
+        _binance_paused_until = max(_binance_paused_until, time.monotonic() + retry)
+        what = "temporarily banned this server's IP (418)" if r.status_code == 418 else "rate-limited this server's IP (429)"
+        raise BinanceRateLimited(f"Binance {what}. Requests paused for {retry}s; try again after that.")
+    r.raise_for_status()
+    return r.json()
+
+
 async def fetch_klines(symbol: str, interval: str, limit: int = 220) -> list[list[Any]]:
     async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.get("https://fapi.binance.com/fapi/v1/klines", params={"symbol": symbol, "interval": interval, "limit": limit})
-        r.raise_for_status()
-        return r.json()
+        return await binance_get(client, f"{FAPI}/fapi/v1/klines", {"symbol": symbol, "interval": interval, "limit": limit})
 
 
 # OI discovery: rank the most-traded USDT perpetuals by open-interest growth.
-OI_CANDIDATES = 150
+OI_MAX_CANDIDATES = 150
 OI_MIN_QUOTE_VOLUME = 5_000_000  # 24h USDT volume; skips illiquid contracts
-OI_CONCURRENCY = 15
+OI_CONCURRENCY = 5
+OI_CACHE_SECONDS = 300
+PERPS_CACHE_SECONDS = 3600
+_oi_cache: dict[tuple[int, int], tuple[float, list[dict[str, Any]]]] = {}
+_perps_cache: tuple[float, set[str]] = (0.0, set())
+
+
+async def usdt_perpetuals(client: httpx.AsyncClient) -> set[str]:
+    global _perps_cache
+    fetched_at, perps = _perps_cache
+    if perps and time.monotonic() - fetched_at < PERPS_CACHE_SECONDS:
+        return perps
+    info = await binance_get(client, "/fapi/v1/exchangeInfo")
+    perps = {
+        s["symbol"] for s in info["symbols"]
+        if s.get("contractType") == "PERPETUAL" and s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING"
+    }
+    _perps_cache = (time.monotonic(), perps)
+    return perps
 
 
 async def discover_oi_movers(limit: int, hours: int) -> list[dict[str, Any]]:
-    async with httpx.AsyncClient(timeout=15, base_url="https://fapi.binance.com") as client:
-        info_r, tickers_r = await asyncio.gather(client.get("/fapi/v1/exchangeInfo"), client.get("/fapi/v1/ticker/24hr"))
-        info_r.raise_for_status()
-        tickers_r.raise_for_status()
-        perps = {
-            s["symbol"] for s in info_r.json()["symbols"]
-            if s.get("contractType") == "PERPETUAL" and s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING"
-        }
-        tickers = [t for t in tickers_r.json() if t["symbol"] in perps and float(t["quoteVolume"]) >= OI_MIN_QUOTE_VOLUME]
+    # Two candidates per requested coin (min 60) keeps each click to ~60-150 Binance requests.
+    candidates = min(OI_MAX_CANDIDATES, max(limit * 2, 60))
+    cached = _oi_cache.get((hours, candidates))
+    if cached and time.monotonic() - cached[0] < OI_CACHE_SECONDS:
+        return cached[1][:limit]
+    async with httpx.AsyncClient(timeout=15, base_url=FAPI) as client:
+        perps = await usdt_perpetuals(client)
+        tickers = await binance_get(client, "/fapi/v1/ticker/24hr")
+        tickers = [t for t in tickers if t["symbol"] in perps and float(t["quoteVolume"]) >= OI_MIN_QUOTE_VOLUME]
         tickers.sort(key=lambda t: float(t["quoteVolume"]), reverse=True)
-        tickers = tickers[:OI_CANDIDATES]
+        tickers = tickers[:candidates]
         sem = asyncio.Semaphore(OI_CONCURRENCY)
 
         async def oi_change(t: dict[str, Any]) -> dict[str, Any] | None:
             async with sem:
                 try:
-                    r = await client.get("/futures/data/openInterestHist", params={"symbol": t["symbol"], "period": "1h", "limit": hours + 1})
-                    r.raise_for_status()
-                    hist = r.json()
+                    hist = await binance_get(client, "/futures/data/openInterestHist", {"symbol": t["symbol"], "period": "1h", "limit": hours + 1})
                 except (httpx.HTTPError, ValueError):
                     return None
             if len(hist) < 2:
@@ -233,16 +275,19 @@ async def discover_oi_movers(limit: int, hours: int) -> list[dict[str, Any]]:
                 "quote_volume_24h": round(float(t["quoteVolume"])),
             }
 
-        rows = [r for r in await asyncio.gather(*(oi_change(t) for t in tickers)) if r]
+        results = await asyncio.gather(*(oi_change(t) for t in tickers), return_exceptions=True)
+    limited = next((r for r in results if isinstance(r, BinanceRateLimited)), None)
+    if limited:
+        raise limited
+    rows = [r for r in results if isinstance(r, dict)]
     rows.sort(key=lambda r: r["oi_change_pct"], reverse=True)
+    _oi_cache[(hours, candidates)] = (time.monotonic(), rows)
     return rows[:limit]
 
 
 async def fetch_price(symbol: str) -> float:
     async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.get("https://fapi.binance.com/fapi/v1/ticker/price", params={"symbol": symbol})
-        r.raise_for_status()
-        return float(r.json()["price"])
+        return float((await binance_get(client, f"{FAPI}/fapi/v1/ticker/price", {"symbol": symbol}))["price"])
 
 
 def ema(values: list[float], period: int) -> float:
@@ -508,6 +553,11 @@ def compute_status(s: sqlite3.Row, price: float) -> str:
         return "ENTRY_TRIGGERED"
 
 
+@app.exception_handler(BinanceRateLimited)
+async def binance_rate_limited(_: Request, exc: BinanceRateLimited) -> JSONResponse:
+    return JSONResponse({"detail": str(exc)}, status_code=429)
+
+
 @app.get("/healthz")
 def healthz() -> dict[str, bool]:
     return {"ok": True}
@@ -591,8 +641,15 @@ async def scan(req: ScanRequest) -> dict[str, Any]:
             return await fetch_klines(symbol, req.interval)
 
     fetched = await asyncio.gather(*(klines(sym) for sym in symbols), return_exceptions=True)
+    limited = [(sym, x) for sym, x in zip(symbols, fetched) if isinstance(x, BinanceRateLimited)]
+    if limited and len(limited) == len(symbols):
+        raise limited[0][1]
     results, errors = [], []
+    if limited:
+        errors.append(f"{len(limited)} symbols skipped: {limited[0][1]}")
     for symbol, rows in zip(symbols, fetched):
+        if isinstance(rows, BinanceRateLimited):
+            continue
         try:
             if isinstance(rows, BaseException):
                 raise rows

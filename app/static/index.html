@@ -1,0 +1,121 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Binance Square Signal Studio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+<script>(function(){var t=localStorage.getItem('theme');if(t)document.documentElement.setAttribute('data-theme',t)})()</script>
+</head>
+<body>
+<div class="topbar">
+  <div class="brand">
+    <span class="mark">BS</span>
+    <h1>Signal Studio</h1>
+    <span class="tagline">for Binance Square</span>
+  </div>
+  <div class="row" style="margin:0;gap:10px">
+    <div id="health"></div>
+    <button id="themeToggle" class="icon-btn" title="Switch theme" aria-label="Switch theme"></button>
+  </div>
+</div>
+
+<main>
+
+<section class="panel">
+  <div class="panel-head"><span class="step">Step 1</span><h2>Binance Square setup</h2></div>
+  <p>Paste only the Square OpenAPI key. The app passes it to Binance's official <code>square-post</code> script and never puts it in command arguments.</p>
+  <form id="settings" class="row" style="margin-top:14px">
+    <input id="key" name="binance_square_openapi_key" type="password" placeholder="Paste Binance Square OpenAPI key">
+    <select name="publish_mode" id="mode"><option value="mock">Mock / test only</option><option value="square_api">Real Binance Square post</option></select>
+    <button type="submit">Save</button>
+  </form>
+  <div class="row" style="margin-top:12px">
+    <button id="install">🧩 Install official Square skill</button>
+    <button id="test">✅ Check ready</button>
+    <button id="clear" class="danger">Clear key</button>
+  </div>
+  <pre id="setupResult" class="log" style="display:none"></pre>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><span class="step">Step 2</span><h2>Scan signals</h2></div>
+  <p>Pulls live klines from Binance Futures and scores LONG/SHORT setups from EMA, RSI, ATR and volume.</p>
+  <div class="row" style="margin-top:14px">
+    <input id="symbols" value="BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,LINKUSDT">
+    <select id="interval"><option>15m</option><option selected>1h</option><option>4h</option></select>
+    <label class="check"><input id="bullish" type="checkbox"> 🐂 Bullish only</label>
+    <button id="scan" class="primary">🔍 Scan</button>
+  </div>
+  <div class="row">
+    <button id="deleteSelectedSignals" class="danger">Delete selected</button>
+    <button id="deleteAllSignals" class="danger">Delete all signals</button>
+  </div>
+  <div id="signals"></div>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><span class="step">Step 3</span><h2>Drafts &amp; publishing</h2></div>
+  <p>Posts are written by a deterministic template engine (no AI) styled after high-engagement Binance Square creators. Each draft auto-generates a dark-theme candlestick chart. Edit before Post now or schedule.</p>
+
+  <div class="group">
+    <div class="group-label">Generate</div>
+    <div class="row">
+      <label class="field">Style<select id="templateSel">
+        <option value="auto">Auto</option>
+        <option value="quick_signal">Quick Signal</option>
+        <option value="creator_hype">Creator Hype</option>
+        <option value="technical_breakdown">Technical Breakdown</option>
+        <option value="contrarian_hook">Contrarian Hook</option>
+        <option value="dca_zone">DCA Zone</option>
+        <option value="reversal_setup">Reversal</option>
+        <option value="btc_market_analysis">BTC Analysis</option>
+        <option value="top_10_signals">Top 10 Watchlist</option>
+      </select></label>
+      <button id="genBulk" class="primary">⚡ Generate 10 posts</button>
+      <button id="genAll">📝 Generate drafts for all signals</button>
+      <button id="genBtc">₿ Generate BTC Analysis</button>
+      <button id="genTop10">🔥 Generate Top 10 Watchlist</button>
+    </div>
+    <p id="generateStatus" class="generate-status" role="status" aria-live="polite"></p>
+  </div>
+
+  <div class="group">
+    <div class="group-label">Manual schedule</div>
+    <div class="row">
+      <label class="field">Start at<input id="startAt" type="datetime-local"></label>
+      <label class="field">Every (min)<input id="spacing" type="number" value="30" min="10"></label>
+      <button id="schedule">⏰ Schedule selected</button>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="group-label">Auto-post queue</div>
+    <div class="row">
+      <label class="field">Interval<select id="autoQueueSpacing">
+        <option value="5">Every 5 min</option>
+        <option value="10">Every 10 min</option>
+        <option value="15">Every 15 min</option>
+      </select></label>
+      <button id="autoQueue" class="primary">▶️ Start auto-post</button>
+      <button id="cancelAutoQueue" class="danger">Cancel queue for selected</button>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="row">
+      <label class="check"><input id="selectAllPosts" type="checkbox"> Select all drafts</label>
+      <button id="deleteAllDrafts" class="danger">Delete all drafts</button>
+    </div>
+  </div>
+
+  <div id="posts"></div>
+</section>
+
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

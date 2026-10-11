@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: bs-bot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # Binance futures API (fapi.binance.com) blocks US IPs — do not use a US region.
+    region: singapore
+    # Persistent disks and always-on scheduling need a paid plan (free instances sleep and lose files).
+    plan: starter
+    numInstances: 1
+    healthCheckPath: /healthz
+    autoDeploy: true
+    disk:
+      name: bs-bot-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: DATA_DIR
+        value: /var/data
+      - key: APP_USERNAME
+        value: admin
+      - key: APP_PASSWORD
+        sync: false # prompted in the Render dashboard on first Blueprint sync

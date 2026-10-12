@@ -140,6 +140,17 @@ class ScanRequest(BaseModel):
     symbols: list[str] = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "LINKUSDT"]
     interval: str = "1h"
     bullish_only: bool = False
+    # Klines fetched by the browser, keyed by symbol; used instead of calling Binance from the server.
+    klines: dict[str, list[list[Any]]] = {}
+
+
+class KlinesUpload(BaseModel):
+    interval: str = "1h"
+    klines: dict[str, list[list[Any]]] = {}
+
+
+class RefreshStatusRequest(BaseModel):
+    price: float | None = None
 
 
 class GenerateRequest(BaseModel):
@@ -183,36 +194,43 @@ class PostIdsRequest(BaseModel):
 
 # Binance answers 429 (slow down) or 418 (IP ban, 2 minutes up to 3 days) when this server's IP sends
 # too many requests, and keeps extending the ban while requests continue. After either, stop calling
-# the futures API until Retry-After passes and read spot market data from data-api.binance.vision instead.
-_futures_paused_until = 0.0
+# Binance from the server until Retry-After passes. The browser fetches market data itself instead
+# (Binance allows CORS) and sends it along, so scans keep working from the user's own IP.
+_binance_paused_until = 0.0
+KLINES_CACHE_SECONDS = 3600
+_klines_cache: dict[tuple[str, str], tuple[float, list[list[Any]]]] = {}
 
 
-async def binance_market_get(futures_path: str, spot_path: str, params: dict[str, Any], timeout: float) -> Any:
-    global _futures_paused_until
+def remember_klines(symbol: str, interval: str, rows: list[list[Any]]) -> None:
+    _klines_cache[(symbol, interval)] = (time.monotonic(), rows)
+
+
+async def binance_get(path: str, params: dict[str, Any], timeout: float) -> Any:
+    global _binance_paused_until
+    wait = _binance_paused_until - time.monotonic()
+    if wait > 0:
+        raise RuntimeError(f"Binance has blocked this server's IP for ~{int(wait) + 1}s more and your browser could not fetch this symbol either.")
     async with httpx.AsyncClient(timeout=timeout) as client:
-        wait = _futures_paused_until - time.monotonic()
-        if wait <= 0:
-            r = await client.get(f"https://fapi.binance.com{futures_path}", params=params)
-            if r.status_code not in (418, 429):
-                r.raise_for_status()
-                return r.json()
-            wait = int(r.headers.get("retry-after") or 120)
-            _futures_paused_until = time.monotonic() + wait
-        r = await client.get(f"https://data-api.binance.vision{spot_path}", params=params)
-        if r.is_success:
-            return r.json()
-        raise RuntimeError(
-            f"Binance Futures has rate-limited this server's IP for ~{int(wait) + 1}s more, "
-            f"and {params['symbol']} is not available on the spot fallback (HTTP {r.status_code})."
-        )
+        r = await client.get(f"https://fapi.binance.com{path}", params=params)
+    if r.status_code in (418, 429):
+        retry = int(r.headers.get("retry-after") or 120)
+        _binance_paused_until = time.monotonic() + retry
+        raise RuntimeError(f"Binance has blocked this server's IP (HTTP {r.status_code}) for ~{retry}s and your browser could not fetch this symbol either.")
+    r.raise_for_status()
+    return r.json()
 
 
 async def fetch_klines(symbol: str, interval: str, limit: int = 220) -> list[list[Any]]:
-    return await binance_market_get("/fapi/v1/klines", "/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": limit}, 15)
+    cached = _klines_cache.get((symbol, interval))
+    if cached and time.monotonic() - cached[0] < KLINES_CACHE_SECONDS:
+        return cached[1]
+    rows = await binance_get("/fapi/v1/klines", {"symbol": symbol, "interval": interval, "limit": limit}, 15)
+    remember_klines(symbol, interval, rows)
+    return rows
 
 
 async def fetch_price(symbol: str) -> float:
-    return float((await binance_market_get("/fapi/v1/ticker/price", "/api/v3/ticker/price", {"symbol": symbol}, 10))["price"])
+    return float((await binance_get("/fapi/v1/ticker/price", {"symbol": symbol}, 10))["price"])
 
 
 def ema(values: list[float], period: int) -> float:
@@ -540,13 +558,27 @@ def test_square() -> dict[str, Any]:
     return {"ok": True, "message": "Ready to post. This check does not publish anything.", "config": cfg}
 
 
+@app.post("/api/klines")
+def upload_klines(req: KlinesUpload) -> dict[str, int]:
+    """Cache browser-fetched klines so charts and BTC context don't need the server to call Binance."""
+    for symbol, rows in req.klines.items():
+        if rows:
+            remember_klines(symbol.upper(), req.interval, rows)
+    return {"count": len(req.klines)}
+
+
 @app.post("/api/scan")
 async def scan(req: ScanRequest) -> dict[str, Any]:
     results, errors = [], []
     for raw in req.symbols:
         symbol = raw.upper().replace("/", "").strip()
         try:
-            sig = analyze(symbol, req.interval, await fetch_klines(symbol, req.interval))
+            rows = req.klines.get(symbol)
+            if rows:
+                remember_klines(symbol, req.interval, rows)
+            else:
+                rows = await fetch_klines(symbol, req.interval)
+            sig = analyze(symbol, req.interval, rows)
             if req.bullish_only and sig["side"] != "LONG":
                 continue
             with conn() as c:
@@ -584,12 +616,12 @@ def delete_all_signals() -> dict[str, Any]:
 
 
 @app.post("/api/signals/{signal_id}/refresh-status")
-async def refresh_status(signal_id: int) -> dict[str, Any]:
+async def refresh_status(signal_id: int, req: RefreshStatusRequest | None = None) -> dict[str, Any]:
     with conn() as c:
         s = c.execute("SELECT * FROM signals WHERE id=?", (signal_id,)).fetchone()
     if not s:
         raise HTTPException(404, "Signal not found")
-    price = await fetch_price(s["symbol"])
+    price = req.price if req and req.price else await fetch_price(s["symbol"])
     new_status = compute_status(s, price)
     with conn() as c:
         c.execute("UPDATE signals SET status=? WHERE id=?", (new_status, signal_id))

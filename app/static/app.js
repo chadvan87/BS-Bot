@@ -35,7 +35,7 @@ function render(){
     </div>
     <div class="actions">
       <button class="primary" onclick="gen(${s.id})">📝 Generate post</button>
-      <button onclick="refreshStatus(${s.id})">🔄 Refresh status</button>
+      <button onclick="refreshStatus(${s.id},'${s.symbol}')">🔄 Refresh status</button>
       <button class="danger" onclick="delSignal(${s.id})">Delete</button>
     </div>
   </div>`).join('')}</div>` : '<div class="empty">No signals yet — run a scan above.</div>';
@@ -69,19 +69,32 @@ $('#settings').onsubmit=async e=>{e.preventDefault();try{const d=await api('/api
 $('#install').onclick=async()=>{if(!confirm('Install only Binance official square-post skill from binance/binance-skills-hub?'))return;setLog('Installing...');try{setLog(JSON.stringify(await api('/api/setup-square-skill',{method:'POST'}),null,2));await load()}catch(x){setLog(x.message)}};
 $('#test').onclick=async()=>{try{setLog(JSON.stringify(await api('/api/test-square',{method:'POST'}),null,2))}catch(x){setLog(x.message)}};
 $('#clear').onclick=async()=>{if(confirm('Remove saved API key?')){await api('/api/settings/key',{method:'DELETE'});await load()}};
+// Market data is fetched from the browser (Binance allows CORS) so scans don't depend on the server's IP,
+// which Binance may rate-limit or ban. Symbols that fail here are fetched by the server as a fallback.
+const FAPI='https://fapi.binance.com'
+async function browserKlines(symbols,interval){const out={};let i=0
+const worker=async()=>{while(i<symbols.length){const sym=symbols[i++];try{const r=await fetch(`${FAPI}/fapi/v1/klines?symbol=${sym}&interval=${interval}&limit=220`);if(r.ok)out[sym]=await r.json()}catch{}}}
+await Promise.all(Array.from({length:5},worker));return out}
+async function shareKlines(symbols,interval){const klines=await browserKlines(symbols,interval)
+await api('/api/klines',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({interval,klines})})}
+async function shareSignalKlines(ids){const byTf={};state.signals.filter(s=>ids.includes(s.id)).forEach(s=>(byTf[s.timeframe]??=new Set()).add(s.symbol))
+await Promise.all(Object.entries(byTf).map(([tf,syms])=>shareKlines([...syms],tf)))}
 function setScanStatus(text, tone=''){const el=$('#scanStatus');el.hidden=!text;el.textContent=text;el.className=`generate-status ${tone}`}
 $('#scan').onclick=async()=>{const btn=$('#scan');btn.disabled=true;setScanStatus('Scanning…')
-try{const r=await api('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbols:$('#symbols').value.split(',').map(x=>x.trim()).filter(Boolean),interval:$('#interval').value,bullish_only:$('#bullish').checked})});await load()
+try{const symbols=[...new Set($('#symbols').value.split(',').map(x=>x.trim().toUpperCase().replace('/','')).filter(Boolean))],interval=$('#interval').value
+const klines=await browserKlines(symbols,interval)
+const r=await api('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbols,interval,bullish_only:$('#bullish').checked,klines})});await load()
 const msg=`${r.results.length} signal${r.results.length===1?'':'s'} added.`
 setScanStatus(r.errors.length?`${msg} ${r.errors.length} failed — ${r.errors.join(' | ')}`:msg,r.errors.length?'error':'success')}
 catch(x){setScanStatus(`Scan failed: ${x.message}`,'error')}finally{btn.disabled=false}};
-window.refreshStatus=async id=>{try{const d=await api(`/api/signals/${id}/refresh-status`,{method:'POST'});await load()}catch(x){alert(x.message)}};
+window.refreshStatus=async(id,symbol)=>{try{let price=null;try{const r=await fetch(`${FAPI}/fapi/v1/ticker/price?symbol=${symbol}`);if(r.ok)price=+(await r.json()).price}catch{}
+await api(`/api/signals/${id}/refresh-status`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({price})});await load()}catch(x){alert(x.message)}};
 window.delSignal=async id=>{if(confirm('Delete this signal?')){try{await api('/api/signals/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({signal_ids:[id]})});await load()}catch(x){alert(x.message)}}};
 $('#deleteSelectedSignals').onclick=async()=>{const ids=[...document.querySelectorAll('.pickSignal:checked')].map(x=>+x.value);if(!ids.length)return alert('Select signals to delete');if(!confirm(`Delete ${ids.length} selected signal(s)?`))return;try{await api('/api/signals/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({signal_ids:ids})});await load()}catch(x){alert(x.message)}};
 $('#deleteAllSignals').onclick=async()=>{if(!state.signals.length)return alert('No signals to delete');if(!confirm(`Delete all ${state.signals.length} signal(s)?`))return;try{await api('/api/signals/delete-all',{method:'POST'});await load()}catch(x){alert(x.message)}};
 window.gen=async id=>{
   const tpl=$('#templateSel').value;
-  try{
+  try{await shareSignalKlines([id]);await shareKlines(['BTCUSDT'],'1h');
     if(tpl==='btc_market_analysis'){await api('/api/generate-btc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({template_name:tpl})})}
     else if(tpl==='top_10_signals'){await api('/api/generate-top10',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})})}
     else{await api('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({signal_id:id,template_name:tpl})})}
@@ -91,6 +104,7 @@ window.gen=async id=>{
 async function generateDrafts(button, ids, label, endpoint='/api/generate-bulk'){
   if(!ids.length)return alert('Scan for signals first');
   button.disabled=true;
+  try{await shareSignalKlines(ids);await shareKlines(['BTCUSDT'],'1h')}catch{}
   button.textContent=`⏳ Generating ${ids.length} draft${ids.length===1?'':'s'}...`;
   setGenerateStatus(`Generating ${ids.length} draft${ids.length===1?'':'s'} — charts can take a moment.`);
   try{
@@ -105,8 +119,8 @@ async function generateDrafts(button, ids, label, endpoint='/api/generate-bulk')
 }
 $('#genBulk').onclick=()=>generateDrafts($('#genBulk'),state.signals.slice(0,10).map(s=>s.id),'⚡ Generate 10 posts');
 $('#genAll').onclick=()=>generateDrafts($('#genAll'),state.signals.map(s=>s.id),'📝 Generate drafts for all signals','/api/generate-all');
-$('#genBtc').onclick=async()=>{$('#genBtc').disabled=true;try{await api('/api/generate-btc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({template_name:'btc_market_analysis'})});await load()}catch(x){alert(x.message)}finally{$('#genBtc').disabled=false}};
-$('#genTop10').onclick=async()=>{$('#genTop10').disabled=true;try{await api('/api/generate-top10',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});await load()}catch(x){alert(x.message)}finally{$('#genTop10').disabled=false}};
+$('#genBtc').onclick=async()=>{$('#genBtc').disabled=true;try{await shareKlines(['BTCUSDT'],'1h');await api('/api/generate-btc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({template_name:'btc_market_analysis'})});await load()}catch(x){alert(x.message)}finally{$('#genBtc').disabled=false}};
+$('#genTop10').onclick=async()=>{$('#genTop10').disabled=true;try{await shareKlines(['BTCUSDT'],'1h');await api('/api/generate-top10',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});await load()}catch(x){alert(x.message)}finally{$('#genTop10').disabled=false}};
 window.savePost=async id=>{await api(`/api/posts/${id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:$(`#p${id}`).value})});await load()};
 window.anotherStyle=async id=>{try{await api(`/api/posts/${id}/regenerate`,{method:'POST'});await load()}catch(x){alert(x.message)}};
 window.togglePreview=id=>{const ta=$(`#p${id}`),pv=$(`#prev${id}`);const show=pv.style.display==='none';pv.style.display=show?'block':'none';ta.style.display=show?'none':'block'};

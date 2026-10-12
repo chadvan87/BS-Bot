@@ -7,6 +7,7 @@ import secrets
 import shutil
 import sqlite3
 import subprocess
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -180,18 +181,38 @@ class PostIdsRequest(BaseModel):
     post_ids: list[int] = []
 
 
+# Binance answers 429 (slow down) or 418 (IP ban, 2 minutes up to 3 days) when this server's IP sends
+# too many requests, and keeps extending the ban while requests continue. After either, stop calling
+# the futures API until Retry-After passes and read spot market data from data-api.binance.vision instead.
+_futures_paused_until = 0.0
+
+
+async def binance_market_get(futures_path: str, spot_path: str, params: dict[str, Any], timeout: float) -> Any:
+    global _futures_paused_until
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        wait = _futures_paused_until - time.monotonic()
+        if wait <= 0:
+            r = await client.get(f"https://fapi.binance.com{futures_path}", params=params)
+            if r.status_code not in (418, 429):
+                r.raise_for_status()
+                return r.json()
+            wait = int(r.headers.get("retry-after") or 120)
+            _futures_paused_until = time.monotonic() + wait
+        r = await client.get(f"https://data-api.binance.vision{spot_path}", params=params)
+        if r.is_success:
+            return r.json()
+        raise RuntimeError(
+            f"Binance Futures has rate-limited this server's IP for ~{int(wait) + 1}s more, "
+            f"and {params['symbol']} is not available on the spot fallback (HTTP {r.status_code})."
+        )
+
+
 async def fetch_klines(symbol: str, interval: str, limit: int = 220) -> list[list[Any]]:
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.get("https://fapi.binance.com/fapi/v1/klines", params={"symbol": symbol, "interval": interval, "limit": limit})
-        r.raise_for_status()
-        return r.json()
+    return await binance_market_get("/fapi/v1/klines", "/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": limit}, 15)
 
 
 async def fetch_price(symbol: str) -> float:
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.get("https://fapi.binance.com/fapi/v1/ticker/price", params={"symbol": symbol})
-        r.raise_for_status()
-        return float(r.json()["price"])
+    return float((await binance_market_get("/fapi/v1/ticker/price", "/api/v3/ticker/price", {"symbol": symbol}, 10))["price"])
 
 
 def ema(values: list[float], period: int) -> float:

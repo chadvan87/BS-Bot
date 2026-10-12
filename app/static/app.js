@@ -70,19 +70,11 @@ $('#install').onclick=async()=>{if(!confirm('Install only Binance official squar
 $('#test').onclick=async()=>{try{setLog(JSON.stringify(await api('/api/test-square',{method:'POST'}),null,2))}catch(x){setLog(x.message)}};
 $('#clear').onclick=async()=>{if(confirm('Remove saved API key?')){await api('/api/settings/key',{method:'DELETE'});await load()}};
 function setScanStatus(text, tone=''){const el=$('#scanStatus');el.hidden=!text;el.textContent=text;el.className=`generate-status ${tone}`}
-async function runScan(){return api('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbols:$('#symbols').value.split(',').map(x=>x.trim()).filter(Boolean),interval:$('#interval').value,bullish_only:$('#bullish').checked})})}
-$('#scan').onclick=async()=>{try{await runScan();await load()}catch(x){alert(x.message)}}
-$('#oiScan').onclick=async()=>{const btn=$('#oiScan'),hours=$('#oiHours').value;btn.disabled=true
-try{setScanStatus(`Finding the top ${$('#oiCount').value} open-interest gainers over the last ${hours}h…`)
-const d=await api('/api/discover',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:+$('#oiCount').value,hours:+hours})})
-if(!d.symbols.length){setScanStatus('Binance returned no open-interest data. Try again in a minute.','error');return}
-$('#symbols').value=d.symbols.join(',')
-const top=d.movers.slice(0,3).map(m=>`${m.symbol} ${m.oi_change_pct>0?'+':''}${m.oi_change_pct}%`).join(', ')
-setScanStatus(`Found ${d.symbols.length} coins (top: ${top}). Scanning…`)
-const r=await runScan();await load()
-setScanStatus(`Scanned ${d.symbols.length} OI gainers → ${r.results.length} signal${r.results.length===1?'':'s'} added${r.errors.length?`. Skipped: ${r.errors[0]}${r.errors.length>1?` (+${r.errors.length-1} more)`:''}`:''}.`,r.errors.length?'':'success')}
-catch(x){setScanStatus(`OI scan failed: ${x.message}`,'error')}finally{btn.disabled=false}}
-
+$('#scan').onclick=async()=>{const btn=$('#scan');btn.disabled=true;setScanStatus('Scanning…')
+try{const r=await api('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbols:$('#symbols').value.split(',').map(x=>x.trim()).filter(Boolean),interval:$('#interval').value,bullish_only:$('#bullish').checked})});await load()
+const msg=`${r.results.length} signal${r.results.length===1?'':'s'} added.`
+setScanStatus(r.errors.length?`${msg} ${r.errors.length} failed — ${r.errors.join(' | ')}`:msg,r.errors.length?'error':'success')}
+catch(x){setScanStatus(`Scan failed: ${x.message}`,'error')}finally{btn.disabled=false}};
 window.refreshStatus=async id=>{try{const d=await api(`/api/signals/${id}/refresh-status`,{method:'POST'});await load()}catch(x){alert(x.message)}};
 window.delSignal=async id=>{if(confirm('Delete this signal?')){try{await api('/api/signals/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({signal_ids:[id]})});await load()}catch(x){alert(x.message)}}};
 $('#deleteSelectedSignals').onclick=async()=>{const ids=[...document.querySelectorAll('.pickSignal:checked')].map(x=>+x.value);if(!ids.length)return alert('Select signals to delete');if(!confirm(`Delete ${ids.length} selected signal(s)?`))return;try{await api('/api/signals/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({signal_ids:ids})});await load()}catch(x){alert(x.message)}};

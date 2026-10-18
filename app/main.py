@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 import secrets
 import shutil
@@ -20,7 +21,9 @@ from pydantic import BaseModel
 
 from app import db
 from app.services.chart_service import generate_signal_chart
-from app.services.post_templates import PostTemplateEngine
+from app.services.market_events import detect_breakout, detect_retest, detect_reversal, evaluate_path
+from app.services.opportunities import OpportunityConfig, age_minutes, rank_opportunities, select_candidates, shortlist_stage2
+from app.services.post_templates import PostTemplateEngine, check_post_text
 
 ROOT = Path(__file__).resolve().parent.parent
 # DATA_DIR lets a host (e.g. a Render persistent disk) keep the DB and charts outside the code dir.
@@ -151,6 +154,8 @@ class KlinesUpload(BaseModel):
 
 class RefreshStatusRequest(BaseModel):
     price: float | None = None
+    # Candles of the signal's timeframe fetched by the browser; used to replay what happened since the signal.
+    klines: list[list[Any]] | None = None
 
 
 class GenerateRequest(BaseModel):
@@ -190,6 +195,36 @@ class PostUpdate(BaseModel):
 
 class PostIdsRequest(BaseModel):
     post_ids: list[int] = []
+
+
+class OpportunityCandidatesRequest(BaseModel):
+    tickers: list[dict[str, Any]] = []
+    mode: str = "top"  # "top" = most active coins, "all" = every liquid coin via the 15m-first funnel
+    funding: dict[str, dict[str, Any]] = {}
+    book: dict[str, dict[str, Any]] = {}
+
+
+class OpportunityShortlistRequest(BaseModel):
+    tickers: list[dict[str, Any]] = []
+    klines15: dict[str, list[list[Any]]] = {}
+    funding: dict[str, dict[str, Any]] = {}
+
+
+class OpportunityScanRequest(BaseModel):
+    tickers: list[dict[str, Any]] = []
+    klines: dict[str, dict[str, list[list[Any]]]] = {}
+    funding: dict[str, dict[str, Any]] = {}
+    oi_hist: dict[str, list[dict[str, Any]]] = {}
+    book: dict[str, dict[str, Any]] = {}
+    spot_symbols: list[str] = []
+    symbols: list[str] = []
+    stats: dict[str, Any] = {}  # funnel counts and request weight used, shown in the UI
+
+
+class OpportunityGenerateRequest(BaseModel):
+    symbol: str
+    template_name: str = "auto"
+    force: bool = False
 
 
 # Binance answers 429 (slow down) or 418 (IP ban, 2 minutes up to 3 days) when this server's IP sends
@@ -437,6 +472,14 @@ def analyze(symbol: str, interval: str, rows: list[list[Any]]) -> dict[str, Any]
 
     digits = 6 if price < 1 else 4 if price < 100 else 2
     q = lambda x: round(x, digits)
+    # Closed-candle evidence for the post templates and the chart/market-data timestamp.
+    breakout = detect_breakout(rows)
+    evidence = {
+        "regime": regime, "adx": round(adx, 1), "breakout": breakout,
+        "retest": detect_retest(rows, breakout),
+        "reversal": detect_reversal(rows, side, rv, support, resistance, atr),
+        "candle_time": int(rows[-1][0]),
+    }
     return {
         "symbol": symbol, "side": side, "timeframe": interval,
         "entry_low": q(lo), "entry_high": q(hi), "stop_loss": q(sl),
@@ -448,7 +491,7 @@ def analyze(symbol: str, interval: str, rows: list[list[Any]]) -> dict[str, Any]
         "price": q(price), "ema20": q(e20), "ema50": q(e50), "ema200": q(e200),
         "rsi": round(rv, 1), "atr": q(atr), "volume_ratio": round(vr, 2),
         "support": q(support), "resistance": q(resistance),
-        "regime": regime, "adx": round(adx, 1), "confidence": confidence,
+        "regime": regime, "adx": round(adx, 1), "confidence": confidence, "evidence": evidence,
     }
 
 
@@ -567,6 +610,23 @@ def upload_klines(req: KlinesUpload) -> dict[str, int]:
     return {"count": len(req.klines)}
 
 
+def insert_signal(sig: dict[str, Any], event_key: str | None = None) -> int:
+    evidence = dict(sig.get("evidence") or {})
+    if event_key:
+        evidence["event_key"] = event_key
+    with conn() as c:
+        cur = c.execute(
+            """INSERT INTO signals(symbol,side,timeframe,entry_low,entry_high,stop_loss,tp1,tp2,tp3,score,reason,
+               price,ema20,ema50,ema200,rsi,atr,volume_ratio,support,resistance,created_at,evidence)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (sig["symbol"], sig["side"], sig["timeframe"], sig["entry_low"], sig["entry_high"], sig["stop_loss"],
+             sig["tp1"], sig["tp2"], sig["tp3"], sig["score"], sig["reason"], sig["price"], sig["ema20"],
+             sig["ema50"], sig["ema200"], sig["rsi"], sig["atr"], sig["volume_ratio"], sig["support"],
+             sig["resistance"], now_iso(), json.dumps(evidence, separators=(",", ":"))),
+        )
+    return cur.lastrowid
+
+
 @app.post("/api/scan")
 async def scan(req: ScanRequest) -> dict[str, Any]:
     results, errors = [], []
@@ -581,17 +641,7 @@ async def scan(req: ScanRequest) -> dict[str, Any]:
             sig = analyze(symbol, req.interval, rows)
             if req.bullish_only and sig["side"] != "LONG":
                 continue
-            with conn() as c:
-                cur = c.execute(
-                    """INSERT INTO signals(symbol,side,timeframe,entry_low,entry_high,stop_loss,tp1,tp2,tp3,score,reason,
-                       price,ema20,ema50,ema200,rsi,atr,volume_ratio,support,resistance,created_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (sig["symbol"], sig["side"], sig["timeframe"], sig["entry_low"], sig["entry_high"], sig["stop_loss"],
-                     sig["tp1"], sig["tp2"], sig["tp3"], sig["score"], sig["reason"], sig["price"], sig["ema20"],
-                     sig["ema50"], sig["ema200"], sig["rsi"], sig["atr"], sig["volume_ratio"], sig["support"],
-                     sig["resistance"], now_iso()),
-                )
-                sig["id"] = cur.lastrowid
+            sig["id"] = insert_signal(sig)
             results.append(sig)
         except Exception as exc:
             errors.append(f"{symbol}: {exc}")
@@ -615,6 +665,45 @@ def delete_all_signals() -> dict[str, Any]:
     return {"ok": True, "count": cur.rowcount}
 
 
+SIGNAL_EXPIRY_CANDLES = 24
+TF_MS = {"5m": 300_000, "15m": 900_000, "1h": 3_600_000, "4h": 14_400_000}
+STATUS_RANK = {"NEW": 0, "ENTRY_TRIGGERED": 1, "TP1_HIT": 2, "TP2_HIT": 3, "TP3_HIT": 4}
+FINAL_STATUSES = {"SL_HIT", "INVALIDATED", "EXPIRED", "AMBIGUOUS", "TP3_HIT"}
+
+
+def parse_evidence(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    try:
+        val = json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+    return val if isinstance(val, dict) else {}
+
+
+def resolve_status(s: Any, price: float, candles: list[list[Any]] | None) -> tuple[str, str]:
+    """Combine the live price with a candle replay. Never regress, and never guess an ambiguous order."""
+    current = s["status"] or "NEW"
+    if current in FINAL_STATUSES:
+        return current, ""
+    new = compute_status(s, price)
+    note = ""
+    if candles:
+        created = datetime.fromisoformat(s["created_at"])
+        created_ms = int(created.timestamp() * 1000)
+        after = [c for c in candles if int(c[0]) > created_ms]  # skip the candle the signal was born in
+        path = evaluate_path(dict(s), after)
+        if path["status"] in ("AMBIGUOUS", "SL_HIT", "INVALIDATED") or STATUS_RANK.get(path["status"], 0) > STATUS_RANK.get(new, 0):
+            new, note = path["status"], path["note"]
+    if new in STATUS_RANK and STATUS_RANK[new] < STATUS_RANK.get(current, 0):
+        new = current  # price drifting back does not undo a target already reached
+    if new == "NEW":
+        age_ms = datetime.now(TZ).timestamp() * 1000 - datetime.fromisoformat(s["created_at"]).timestamp() * 1000
+        if age_ms > SIGNAL_EXPIRY_CANDLES * TF_MS.get(s["timeframe"], 3_600_000):
+            new, note = "EXPIRED", "Price never reached the entry zone within the setup window."
+    return new, note
+
+
 @app.post("/api/signals/{signal_id}/refresh-status")
 async def refresh_status(signal_id: int, req: RefreshStatusRequest | None = None) -> dict[str, Any]:
     with conn() as c:
@@ -622,18 +711,39 @@ async def refresh_status(signal_id: int, req: RefreshStatusRequest | None = None
     if not s:
         raise HTTPException(404, "Signal not found")
     price = req.price if req and req.price else await fetch_price(s["symbol"])
-    new_status = compute_status(s, price)
+    new_status, note = resolve_status(s, price, req.klines if req else None)
+    evidence = parse_evidence(s["evidence"] if "evidence" in s.keys() else None)
+    evidence["last_check"] = {"price": price, "time": now_iso(), "note": note}
     with conn() as c:
-        c.execute("UPDATE signals SET status=? WHERE id=?", (new_status, signal_id))
-    return {"ok": True, "status": new_status, "price": price}
+        c.execute("UPDATE signals SET status=?, evidence=? WHERE id=?", (new_status, json.dumps(evidence, separators=(",", ":")), signal_id))
+    return {"ok": True, "status": new_status, "price": price, "note": note}
 
 
 def render_chart_for_signal(s: sqlite3.Row, rows: list[list[Any]], btc_regime: str = "") -> str:
+    """Render the chart for exactly this signal: its symbol, timeframe, side and levels, and the
+    candles up to the market-data timestamp stored with it (so a later refetch can't shift the chart)."""
     sig = dict(s)
     if btc_regime:
         sig["btc_regime"] = btc_regime
+    candle_time = parse_evidence(sig.get("evidence")).get("candle_time")
+    if candle_time:
+        rows = [r for r in rows if int(r[0]) <= int(candle_time)]
+        if not rows or int(rows[-1][0]) != int(candle_time):
+            raise ValueError("candle data does not include the candle this signal was made on")
     out_path = CHARTS_DIR / f"{s['symbol']}_{s['id']}_{int(datetime.now().timestamp())}.png"
-    return generate_signal_chart(rows, sig, out_path, dark_theme=True)
+    path = generate_signal_chart(rows, sig, out_path, dark_theme=True)
+    if not Path(path).exists() or Path(path).stat().st_size < 1000:
+        raise ValueError("chart file was not written")
+    return path
+
+
+async def chart_for_signal(s: sqlite3.Row, btc_regime: str = "") -> str:
+    """Chart for a signal post, or HTTP 502 — a signal post must never silently lose its image."""
+    try:
+        rows = await fetch_klines(s["symbol"], s["timeframe"])
+        return render_chart_for_signal(s, rows, btc_regime)
+    except Exception as exc:
+        raise HTTPException(502, f"Chart image failed for {s['symbol']} {s['timeframe']}: {exc}. No draft was changed or created.")
 
 
 def recent_template_names(limit: int = 5) -> list[str]:
@@ -642,21 +752,19 @@ def recent_template_names(limit: int = 5) -> list[str]:
     return [r["template_name"] for r in rows if r["template_name"]][::-1]
 
 
-async def generate_one(signal_id: int, template_name: str = "auto") -> dict[str, Any]:
+async def generate_one(signal_id: int, template_name: str = "auto", extra_context: dict[str, Any] | None = None) -> dict[str, Any]:
     with conn() as c:
         s = c.execute("SELECT * FROM signals WHERE id=?", (signal_id,)).fetchone()
     if not s:
         raise HTTPException(404, "Signal not found")
     sig = dict(s)
-    mc: dict[str, Any] = {"recent_templates": recent_template_names()}
+    mc: dict[str, Any] = {"recent_templates": recent_template_names(), **(extra_context or {})}
     content = template_engine.generate(sig, template_name=template_name, market_context=mc)
     used_template = template_engine.last_template
-    chart_path = ""
-    try:
-        rows = await fetch_klines(s["symbol"], s["timeframe"])
-        chart_path = render_chart_for_signal(s, rows)
-    except Exception:
-        chart_path = ""
+    problems = check_post_text(content)
+    if problems:
+        raise HTTPException(500, "Generated post failed content checks: " + "; ".join(problems))
+    chart_path = await chart_for_signal(s)
     with conn() as c:
         cur = c.execute(
             "INSERT INTO posts(signal_id,title,content,status,created_at,chart_path,template_name) VALUES(?,?,?,?,?,?,?)",
@@ -730,22 +838,13 @@ async def build_btc_context(interval: str = "1h") -> tuple[dict[str, Any], list[
 async def generate_btc(req: GenerateBtcRequest) -> dict[str, Any]:
     btc_sig, rows = await build_btc_context(req.interval)
     mc = btc_sig["market_context"]
-    with conn() as c:
-        cur = c.execute(
-            """INSERT INTO signals(symbol,side,timeframe,entry_low,entry_high,stop_loss,tp1,tp2,tp3,score,reason,
-               price,ema20,ema50,ema200,rsi,atr,volume_ratio,support,resistance,created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                btc_sig["symbol"], btc_sig["side"], btc_sig["timeframe"], btc_sig["entry_low"], btc_sig["entry_high"],
-                btc_sig["stop_loss"], btc_sig["tp1"], btc_sig["tp2"], btc_sig["tp3"], btc_sig["score"], btc_sig["reason"],
-                btc_sig["price"], btc_sig["ema20"], btc_sig["ema50"], btc_sig["ema200"], btc_sig["rsi"], btc_sig["atr"],
-                btc_sig["volume_ratio"], btc_sig["support"], btc_sig["resistance"], now_iso(),
-            ),
-        )
-        signal_id = cur.lastrowid
+    signal_id = insert_signal(btc_sig)
     template_name = req.template_name if req.template_name in ("btc_market_analysis", "btc_decisive_zone") else "btc_market_analysis"
     content = template_engine.generate(btc_sig, template_name=template_name, market_context=mc)
-    chart_path = render_chart_for_signal({**btc_sig, "id": signal_id}, rows, btc_regime=mc["regime"])
+    try:
+        chart_path = render_chart_for_signal({**btc_sig, "id": signal_id, "evidence": json.dumps(btc_sig.get("evidence") or {})}, rows, btc_regime=mc["regime"])
+    except Exception as exc:
+        raise HTTPException(502, f"Chart image failed for BTCUSDT {req.interval}: {exc}. No draft was created.")
     with conn() as c:
         cur = c.execute(
             "INSERT INTO posts(signal_id,title,content,status,created_at,chart_path,template_name) VALUES(?,?,?,?,?,?,?)",
@@ -796,12 +895,7 @@ async def regenerate_post(post_id: int) -> dict[str, Any]:
     mc = {"recent_templates": recent}
     content = template_engine.generate(sig, template_name="auto", market_context=mc)
     used_template = template_engine.last_template
-    chart_path = p["chart_path"] or ""
-    try:
-        rows = await fetch_klines(s["symbol"], s["timeframe"])
-        chart_path = render_chart_for_signal(s, rows)
-    except Exception:
-        pass
+    chart_path = await chart_for_signal(s)
     with conn() as c:
         c.execute(
             "UPDATE posts SET content=?, chart_path=?, template_name=? WHERE id=?",
@@ -822,6 +916,10 @@ async def publish_post(post_id: int) -> dict[str, Any]:
         p = c.execute("SELECT * FROM posts WHERE id=?", (post_id,)).fetchone()
     if not p:
         raise HTTPException(404, "Post not found")
+    chart_file = p["chart_path"] if "chart_path" in p.keys() else ""
+    if p["signal_id"] and not (chart_file and Path(chart_file).exists()):
+        raise HTTPException(409, "This signal post is missing its chart image, so it was not published. "
+                                 "Use 'Another style' to regenerate the chart, or delete the draft.")
     mode = get_setting("PUBLISH_MODE", "mock")
     if mode == "mock":
         result = "MOCK: saved locally, nothing sent to Binance."
@@ -909,6 +1007,107 @@ def delete_all_posts() -> dict[str, Any]:
     with conn() as c:
         cur = c.execute("DELETE FROM posts")
     return {"ok": True, "count": cur.rowcount}
+
+
+# ---- Signal Opportunities (ranking layer on top of the scanner) ----------------------------------
+
+OPPORTUNITIES_KEY = "OPPORTUNITIES_LAST"
+
+
+def opportunity_config() -> OpportunityConfig:
+    try:
+        raw = json.loads(get_setting("OPPORTUNITY_CONFIG", "") or "{}")
+    except ValueError:
+        raw = {}
+    return OpportunityConfig.from_dict(raw if isinstance(raw, dict) else {})
+
+
+def signal_history() -> dict[str, dict[str, int]]:
+    """Per symbol: how many of our own past signals reached a target versus the stop."""
+    out: dict[str, dict[str, int]] = {}
+    with conn() as c:
+        rows = c.execute("SELECT symbol, status FROM signals WHERE status IN ('TP1_HIT','TP2_HIT','TP3_HIT','SL_HIT')").fetchall()
+    for r in rows:
+        h = out.setdefault(r["symbol"], {"tp": 0, "sl": 0})
+        h["sl" if r["status"] == "SL_HIT" else "tp"] += 1
+    return out
+
+
+def load_opportunities() -> dict[str, Any]:
+    try:
+        return json.loads(get_setting(OPPORTUNITIES_KEY, "") or "{}")
+    except ValueError:
+        return {}
+
+
+@app.get("/api/opportunities")
+def get_opportunities() -> dict[str, Any]:
+    data = load_opportunities()
+    return data or {"results": [], "skipped": [], "scanned_at": None, "config": opportunity_config().to_dict()}
+
+
+@app.post("/api/opportunities/candidates")
+def opportunity_candidates(req: OpportunityCandidatesRequest) -> dict[str, Any]:
+    """Which symbols the browser should fetch candles for (liquid and moving), per the configured thresholds."""
+    cfg = opportunity_config()
+    mode = "all" if req.mode == "all" else "top"
+    return {"symbols": select_candidates(req.tickers, cfg, mode, req.funding, req.book), "mode": mode, "config": cfg.to_dict()}
+
+
+@app.post("/api/opportunities/shortlist")
+def opportunity_shortlist(req: OpportunityShortlistRequest) -> dict[str, Any]:
+    """Stage 2 of the "all" funnel: which coins showed a fresh 15m trigger and deserve 1h/4h/OI requests."""
+    return shortlist_stage2(req.klines15, req.tickers, req.funding, opportunity_config())
+
+
+@app.post("/api/opportunities/scan")
+def opportunity_scan(req: OpportunityScanRequest) -> dict[str, Any]:
+    cfg = opportunity_config()
+    for sym, by_tf in req.klines.items():
+        for tf, rows in by_tf.items():
+            if rows:
+                remember_klines(sym.upper(), tf, rows)
+    result = rank_opportunities(req.model_dump(), cfg, analyze, signal_history())
+    result["stats"] = req.stats
+    set_setting(OPPORTUNITIES_KEY, json.dumps(result, separators=(",", ":")))
+    return result
+
+
+@app.post("/api/opportunities/generate")
+async def opportunity_generate(req: OpportunityGenerateRequest) -> dict[str, Any]:
+    """Turn one ranked opportunity into a normal DRAFT (text + chart). Publishing stays manual."""
+    cfg = opportunity_config()
+    symbol = req.symbol.upper()
+    last = load_opportunities()
+    item = next((r for r in last.get("results", []) if r["symbol"] == symbol), None)
+    if not item:
+        raise HTTPException(404, f"{symbol} is not in the latest opportunity scan. Scan again.")
+    age = age_minutes(last.get("scanned_at"))
+    if (age is None or age > cfg.stale_minutes) and not req.force:
+        raise HTTPException(409, f"This opportunity scan is stale (older than {cfg.stale_minutes} minutes). Scan again before posting.")
+    cutoff = (datetime.now(TZ) - timedelta(hours=cfg.dedupe_hours)).isoformat(timespec="seconds")
+    with conn() as c:
+        dupes = c.execute(
+            """SELECT p.id FROM posts p JOIN signals s ON s.id=p.signal_id
+               WHERE s.evidence LIKE ? AND p.created_at>=? LIMIT 1""",
+            (f'%"event_key":"{item["event_key"]}"%', cutoff),
+        ).fetchall()
+    if dupes and not req.force:
+        raise HTTPException(409, f"A post for this same market event already exists (draft #{dupes[0]['id']}). Edit that one, or force a new draft.")
+    rows = _klines_cache.get((symbol, "1h"), (0, []))[1]
+    if not rows:
+        raise HTTPException(409, f"No cached 1h candles for {symbol}. Scan again.")
+    sig = analyze(symbol, "1h", rows)
+    if sig["side"] != item["signal_side"]:
+        raise HTTPException(409, f"The {symbol} signal changed direction since the scan. Scan again.")
+    signal_id = insert_signal(sig, item["event_key"])
+    template = req.template_name
+    if template == "auto" and not item["ready"]:
+        template = "watchlist_post"
+    ctx = {"opportunity": {"labels": item["labels"], "rel_vol_15m": item["relative_volume"],
+                           "change_1h": item["change_1h"], "change_24h": item["change_24h"]}}
+    draft = await generate_one(signal_id, template, ctx)
+    return {**draft, "signal_id": signal_id, "ready": item["ready"], "warnings": item["blockers"]}
 
 
 async def process_due_posts() -> None:

@@ -7,9 +7,14 @@ a deterministic Python template engine (see `app/services/post_templates.py`).
 ## Architecture
 - FastAPI + SQLite (or Postgres/Supabase when `DATABASE_URL` is set, see `app/db.py`) + vanilla HTML/JS.
 - Python scans market data, manages drafts/scheduling, and generates post copy and charts.
-- `app/services/post_templates.py` — `PostTemplateEngine`, 18 deterministic post styles
-  (no AI, no network calls). Auto-selects a style from signal data (side, RSI, score,
-  entry-zone width, status) and avoids repeating the last-used style consecutively.
+- `app/services/post_templates.py` — `PostTemplateEngine`, 6 deterministic categories (breaking momentum,
+  trade setup, technical deep dive, reversal watch, signal update, market radar); the old 18 style names are
+  aliases. No AI, no randomness, no network. Evidence-driven: reasons come from stored signal data
+  (`signals.evidence` JSON), `check_post_text()` enforces banned phrases / cashtag rules.
+- `app/services/market_events.py` — closed-candle breakout/retest/reversal/volume-surge detectors and
+  `evaluate_path()` (candle replay that reports AMBIGUOUS instead of guessing stop-vs-target order).
+- `app/services/opportunities.py` — Signal Opportunities scoring/ranking (pure functions; data is fetched
+  by the browser and posted to `/api/opportunities/scan`).
 - `app/services/chart_service.py` — `generate_signal_chart()`, dark-theme matplotlib
   candlestick chart with EMA20/50/200, volume + RSI panels, entry/SL/TP levels,
   support/resistance, and a LONG/SHORT badge.

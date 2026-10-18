@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS settings (
 """
 
 SIGNAL_EXTRA_COLUMNS = ("price", "ema20", "ema50", "ema200", "rsi", "atr", "volume_ratio", "support", "resistance")
+SIGNAL_EXTRA_TEXT_COLUMNS = ("evidence",)  # JSON: breakout/retest/reversal evidence, last status check
 POST_EXTRA_COLUMNS = (("template_name", "TEXT"), ("delete_after_publish", "INTEGER DEFAULT 0"))
 DEFAULT_SETTINGS = (("PUBLISH_MODE", "mock"), ("MIN_SPACING_MINUTES", "20"), ("DAILY_SOFT_LIMIT", "40"))
 
@@ -138,6 +139,8 @@ def init_schema(sqlite_path: Path) -> None:
                 c.execute(stmt)
             for col in SIGNAL_EXTRA_COLUMNS:
                 c.execute(f"ALTER TABLE signals ADD COLUMN IF NOT EXISTS {col} DOUBLE PRECISION")
+            for col in SIGNAL_EXTRA_TEXT_COLUMNS:
+                c.execute(f"ALTER TABLE signals ADD COLUMN IF NOT EXISTS {col} TEXT")
             for col, col_type in POST_EXTRA_COLUMNS:
                 c.execute(f"ALTER TABLE posts ADD COLUMN IF NOT EXISTS {col} {col_type}")
             # Supabase exposes the public schema over its REST API; RLS with no policies blocks
@@ -153,6 +156,9 @@ def init_schema(sqlite_path: Path) -> None:
         for col in SIGNAL_EXTRA_COLUMNS:
             if col not in signal_cols:
                 c.execute(f"ALTER TABLE signals ADD COLUMN {col} REAL")
+        for col in SIGNAL_EXTRA_TEXT_COLUMNS:
+            if col not in signal_cols:
+                c.execute(f"ALTER TABLE signals ADD COLUMN {col} TEXT")
         post_cols = {r["name"] for r in c.execute("PRAGMA table_info(posts)")}
         for col, col_type in POST_EXTRA_COLUMNS:
             if col not in post_cols:

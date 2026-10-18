@@ -451,3 +451,14 @@ pre.log {
   .stat-grid { grid-template-columns: 1fr; }
   .signal-score { margin-left: 0; }
 }
+
+/* Signal Opportunities */
+.opp-group{margin:18px 0 6px;font-weight:600}
+.opp-score{font-family:'IBM Plex Mono',monospace}
+.opp-why{margin:10px 0 0;padding-left:18px;font-size:13px}
+.opp-why li{margin:2px 0}
+.opp-risk{color:var(--danger,#ef5350)}
+.opp-missing{font-size:12px;opacity:.7;margin-top:6px}
+.opp-detail{margin-top:10px;font-size:12px;white-space:pre-wrap}
+.opp-preview{margin-top:10px}
+.opp-preview img{max-width:260px;border-radius:8px;display:block;margin-bottom:8px}

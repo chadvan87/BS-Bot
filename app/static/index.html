@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/style.css?v=3">
+<link rel="stylesheet" href="/static/style.css?v=4">
 <script>(function(){var t=localStorage.getItem('theme');if(t)document.documentElement.setAttribute('data-theme',t)})()</script>
 </head>
 <body>
@@ -58,6 +58,22 @@
   <div id="signals"></div>
 </section>
 
+<section class="panel" id="opportunities">
+  <div class="panel-head"><span class="step">Step 2b</span><h2>Signal Opportunities</h2></div>
+  <p>Ranks liquid Binance Futures coins by technical setup quality <em>and</em> fresh market activity (volume surges, closed-candle breakouts, funding / open-interest shifts). The Opportunity Score is not a win probability or a view forecast. Nothing is posted automatically.</p>
+  <div class="row" style="margin-top:14px">
+    <label class="field">Mode<select id="oppMode">
+      <option value="top">Fast: top 30 most active coins</option>
+      <option value="all">Deep: every liquid coin (15m-first funnel)</option>
+    </select></label>
+    <button id="scanOpp" class="primary">🔭 Scan opportunities</button>
+    <button id="oppCancel" class="danger" hidden>Cancel</button>
+    <span id="oppUpdated" class="pill" hidden></span>
+  </div>
+  <div id="oppStatus" class="generate-status" hidden></div>
+  <div id="oppList"></div>
+</section>
+
 <section class="panel">
   <div class="panel-head"><span class="step">Step 3</span><h2>Drafts &amp; publishing</h2></div>
   <p>Posts are written by a deterministic template engine (no AI) styled after high-engagement Binance Square creators. Each draft auto-generates a dark-theme candlestick chart. Edit before Post now or schedule.</p>
@@ -67,14 +83,13 @@
     <div class="row">
       <label class="field">Style<select id="templateSel">
         <option value="auto">Auto</option>
-        <option value="quick_signal">Quick Signal</option>
-        <option value="creator_hype">Creator Hype</option>
-        <option value="technical_breakdown">Technical Breakdown</option>
-        <option value="contrarian_hook">Contrarian Hook</option>
-        <option value="dca_zone">DCA Zone</option>
-        <option value="reversal_setup">Reversal</option>
-        <option value="btc_market_analysis">BTC Analysis</option>
-        <option value="top_10_signals">Top 10 Watchlist</option>
+        <option value="breaking_momentum">Breaking Momentum</option>
+        <option value="trade_setup">Trade Setup</option>
+        <option value="technical_deep_dive">Technical Deep Dive</option>
+        <option value="reversal_watch">Reversal Watch</option>
+        <option value="signal_update">Signal Update</option>
+        <option value="btc_market_analysis">Market Radar: BTC</option>
+        <option value="top_10_signals">Market Radar: Top 10</option>
       </select></label>
       <button id="genBulk" class="primary">⚡ Generate 10 posts</button>
       <button id="genAll">📝 Generate drafts for all signals</button>
@@ -117,6 +132,7 @@
 </section>
 
 </main>
-<script src="/static/app.js?v=3"></script>
+<script src="/static/ratelimit.js?v=1"></script>
+<script src="/static/app.js?v=5"></script>
 </body>
 </html>

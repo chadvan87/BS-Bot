@@ -221,6 +221,12 @@ class OpportunityScanRequest(BaseModel):
     stats: dict[str, Any] = {}  # funnel counts and request weight used, shown in the UI
 
 
+class OpportunityGenerateAllRequest(BaseModel):
+    scope: str = "watchlist"  # ready = publish-ready only, watchlist = ready + watchlist, all = every ranked coin
+    limit: int = 50
+    force: bool = False
+
+
 class OpportunityGenerateRequest(BaseModel):
     symbol: str
     template_name: str = "auto"
@@ -1073,6 +1079,43 @@ def opportunity_scan(req: OpportunityScanRequest) -> dict[str, Any]:
     return result
 
 
+def check_scan_fresh(last: dict[str, Any], cfg: OpportunityConfig, force: bool) -> None:
+    age = age_minutes(last.get("scanned_at"))
+    if (age is None or age > cfg.stale_minutes) and not force:
+        raise HTTPException(409, f"This opportunity scan is stale (older than {cfg.stale_minutes} minutes). Scan again before posting.")
+
+
+async def draft_from_opportunity(item: dict[str, Any], cfg: OpportunityConfig, template: str, force: bool) -> dict[str, Any]:
+    symbol = item["symbol"]
+    cutoff = (datetime.now(TZ) - timedelta(hours=cfg.dedupe_hours)).isoformat(timespec="seconds")
+    with conn() as c:
+        dupes = c.execute(
+            """SELECT p.id FROM posts p JOIN signals s ON s.id=p.signal_id
+               WHERE s.evidence LIKE ? AND p.created_at>=? LIMIT 1""",
+            (f'%"event_key":"{item["event_key"]}"%', cutoff),
+        ).fetchall()
+    if dupes and not force:
+        raise HTTPException(409, f"A post for this same market event already exists (draft #{dupes[0]['id']}). Edit that one, or force a new draft.")
+    rows = _klines_cache.get((symbol, "1h"), (0, []))[1]
+    if not rows:
+        raise HTTPException(409, f"No cached 1h candles for {symbol}. Scan again.")
+    sig = analyze(symbol, "1h", rows)
+    if sig["side"] != item["signal_side"]:
+        raise HTTPException(409, f"The {symbol} signal changed direction since the scan. Scan again.")
+    signal_id = insert_signal(sig, item["event_key"])
+    if template == "auto" and not item["ready"]:
+        template = "watchlist_post"
+    ctx = {"opportunity": {"labels": item["labels"], "rel_vol_15m": item["relative_volume"],
+                           "change_1h": item["change_1h"], "change_24h": item["change_24h"]}}
+    try:
+        draft = await generate_one(signal_id, template, ctx)
+    except Exception:
+        with conn() as c:  # no orphan signal when the draft or its chart failed
+            c.execute("DELETE FROM signals WHERE id=?", (signal_id,))
+        raise
+    return {**draft, "symbol": symbol, "signal_id": signal_id, "ready": item["ready"], "warnings": item["blockers"]}
+
+
 @app.post("/api/opportunities/generate")
 async def opportunity_generate(req: OpportunityGenerateRequest) -> dict[str, Any]:
     """Turn one ranked opportunity into a normal DRAFT (text + chart). Publishing stays manual."""
@@ -1082,32 +1125,31 @@ async def opportunity_generate(req: OpportunityGenerateRequest) -> dict[str, Any
     item = next((r for r in last.get("results", []) if r["symbol"] == symbol), None)
     if not item:
         raise HTTPException(404, f"{symbol} is not in the latest opportunity scan. Scan again.")
-    age = age_minutes(last.get("scanned_at"))
-    if (age is None or age > cfg.stale_minutes) and not req.force:
-        raise HTTPException(409, f"This opportunity scan is stale (older than {cfg.stale_minutes} minutes). Scan again before posting.")
-    cutoff = (datetime.now(TZ) - timedelta(hours=cfg.dedupe_hours)).isoformat(timespec="seconds")
-    with conn() as c:
-        dupes = c.execute(
-            """SELECT p.id FROM posts p JOIN signals s ON s.id=p.signal_id
-               WHERE s.evidence LIKE ? AND p.created_at>=? LIMIT 1""",
-            (f'%"event_key":"{item["event_key"]}"%', cutoff),
-        ).fetchall()
-    if dupes and not req.force:
-        raise HTTPException(409, f"A post for this same market event already exists (draft #{dupes[0]['id']}). Edit that one, or force a new draft.")
-    rows = _klines_cache.get((symbol, "1h"), (0, []))[1]
-    if not rows:
-        raise HTTPException(409, f"No cached 1h candles for {symbol}. Scan again.")
-    sig = analyze(symbol, "1h", rows)
-    if sig["side"] != item["signal_side"]:
-        raise HTTPException(409, f"The {symbol} signal changed direction since the scan. Scan again.")
-    signal_id = insert_signal(sig, item["event_key"])
-    template = req.template_name
-    if template == "auto" and not item["ready"]:
-        template = "watchlist_post"
-    ctx = {"opportunity": {"labels": item["labels"], "rel_vol_15m": item["relative_volume"],
-                           "change_1h": item["change_1h"], "change_24h": item["change_24h"]}}
-    draft = await generate_one(signal_id, template, ctx)
-    return {**draft, "signal_id": signal_id, "ready": item["ready"], "warnings": item["blockers"]}
+    check_scan_fresh(last, cfg, req.force)
+    return await draft_from_opportunity(item, cfg, req.template_name, req.force)
+
+
+@app.post("/api/opportunities/generate-all")
+async def opportunity_generate_all(req: OpportunityGenerateAllRequest) -> dict[str, Any]:
+    """One DRAFT (text + chart) per ranked opportunity in `scope`. Never publishes; duplicates are skipped."""
+    cfg = opportunity_config()
+    last = load_opportunities()
+    check_scan_fresh(last, cfg, req.force)
+    scopes = {"ready": {"publish_ready"}, "watchlist": {"publish_ready", "watchlist"}, "all": {"publish_ready", "watchlist", "low"}}
+    if req.scope not in scopes:
+        raise HTTPException(400, "scope must be ready, watchlist or all")
+    items = [r for r in last.get("results", []) if r["group"] in scopes[req.scope]][: max(1, min(req.limit, 100))]
+    if not items:
+        raise HTTPException(400, "No opportunities in that scope. Scan first, or pick a wider scope.")
+    results, skipped, errors = [], [], []
+    for item in items:
+        try:
+            results.append(await draft_from_opportunity(item, cfg, "auto", req.force))
+        except HTTPException as exc:
+            (skipped if exc.status_code == 409 and "same market event" in str(exc.detail) else errors).append(f"{item['symbol']}: {exc.detail}")
+        except Exception as exc:
+            errors.append(f"{item['symbol']}: {exc}")
+    return {"results": results, "skipped": skipped, "errors": errors, "considered": len(items)}
 
 
 async def process_due_posts() -> None:

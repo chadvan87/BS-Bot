@@ -390,3 +390,43 @@ def test_history_from_past_signals_feeds_the_score():
     assert main.signal_history()["AAAUSDT"] == {"tp": 5, "sl": 2}
     item = run_opp_scan()["results"][0]
     assert item["components"]["history"]["value"] == pytest.approx(6 / 9 * 100, abs=0.1)
+
+
+def test_generate_all_creates_one_draft_with_chart_per_opportunity_and_skips_duplicates():
+    run_opp_scan(("AAAUSDT", "BBBUSDT", "CCCUSDT"))
+    r = client.post("/api/opportunities/generate-all", json={"scope": "all"})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert len(d["results"]) == 3 and d["errors"] == [] and d["considered"] == 3
+    for item in d["results"]:
+        assert Path(item["chart_path"]).exists() and post_row(item["id"])["status"] == "DRAFT"
+    again = client.post("/api/opportunities/generate-all", json={"scope": "all"}).json()
+    assert again["results"] == [] and len(again["skipped"]) == 3
+    forced = client.post("/api/opportunities/generate-all", json={"scope": "all", "force": True}).json()
+    assert len(forced["results"]) == 3
+
+
+def test_generate_all_scope_and_validation():
+    run_opp_scan()
+    assert client.post("/api/opportunities/generate-all", json={"scope": "nope"}).status_code == 400
+    ready = client.post("/api/opportunities/generate-all", json={"scope": "ready"})
+    assert ready.status_code in (200, 400)  # 400 when nothing is publish-ready in this data
+    main.set_setting(main.OPPORTUNITIES_KEY, json.dumps({"results": [], "scanned_at": datetime.now(main.TZ).isoformat()}))
+    assert client.post("/api/opportunities/generate-all", json={"scope": "all"}).status_code == 400
+
+
+def test_generate_all_refuses_stale_scan():
+    out = run_opp_scan()
+    out["scanned_at"] = (datetime.now(main.TZ) - timedelta(hours=5)).isoformat(timespec="seconds")
+    main.set_setting(main.OPPORTUNITIES_KEY, json.dumps(out))
+    assert client.post("/api/opportunities/generate-all", json={"scope": "all"}).status_code == 409
+
+
+def test_generate_all_reports_chart_failures_and_leaves_no_orphan_signals(monkeypatch):
+    run_opp_scan(("AAAUSDT", "BBBUSDT"))
+    monkeypatch.setattr(main, "generate_signal_chart", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no chart")))
+    d = client.post("/api/opportunities/generate-all", json={"scope": "all"}).json()
+    assert d["results"] == [] and len(d["errors"]) == 2 and "Chart image failed" in d["errors"][0]
+    with main.conn() as c:
+        assert c.execute("SELECT COUNT(*) AS n FROM signals").fetchone()["n"] == 0
+        assert c.execute("SELECT COUNT(*) AS n FROM posts").fetchone()["n"] == 0

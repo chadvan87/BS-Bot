@@ -170,13 +170,13 @@ await new Promise(res=>setTimeout(res,600*2**attempt+Math.random()*300))}}
 async function pool(jobs,size,fn){let i=0;await Promise.all(Array.from({length:size},async()=>{while(i<jobs.length&&!oppAbort){const j=jobs[i++];await fn(j)}}))}
 const kl=(s,tf,lim,ttl)=>binJson(`${FAPI}/fapi/v1/klines?symbol=${s}&interval=${tf}&limit=${lim}`,{weight:klineWeight(lim),ttl:ttl??OPP_TTL[tf]}).then(rows=>rows.map(r=>r.slice(0,8)))
 function oppStatus(text,tone=''){const el=$('#oppStatus');el.hidden=!text;el.textContent=text;el.className=`generate-status ${tone}`}
-const oppDrafts={}
+const oppDrafts={};let oppCompact=(()=>{try{return localStorage.getItem('oppCompact')==='1'}catch{return false}})()
 const fmtPct=v=>v==null?'n/a':(v>0?'+':'')+v.toFixed(1)+'%'
 const LABELS={unusual_volume:'unusual volume',one_off_spike:'one-off spike',breakout:'breakout',potential_breakout:'potential breakout',retest:'retest',reversal:'reversal',mover:'mover',oi_anomaly:'OI anomaly',price_oi_divergence:'price/OI divergence',funding_extreme:'extreme funding',exhausted:'exhausted',manipulation_risk:'manipulation risk'}
 function oppCard(o){const l=o.liquidity||{};const comps=Object.entries(o.components||{}).map(([k,c])=>`${k}: ${c.value==null?'n/a (excluded)':c.value} × ${(c.effective_weight*100).toFixed(0)}% — ${c.note||''}`).join('\n')
 const d=oppDrafts[o.symbol]
-return `<div class="signal">
- <div class="signal-top"><span class="side ${o.direction==='LONG'?'long':o.direction==='SHORT'?'short':''}">${esc(o.direction)}</span>
+return `<div class="signal${oppCompact?' collapsed':''}" data-sym="${o.symbol}">
+ <div class="signal-top" onclick="oppToggle('${o.symbol}',event)"><span class="chev">▾</span><span class="side ${o.direction==='LONG'?'long':o.direction==='SHORT'?'short':''}">${esc(o.direction)}</span>
   <span class="signal-symbol">${esc(o.symbol)}</span>
   <span class="pill ${o.tier==='high'?'ok':''}">${o.tier}</span>
   ${o.labels.map(x=>`<span class="pill accent">${esc(LABELS[x]||x)}</span>`).join('')}
@@ -204,8 +204,16 @@ function renderOpps(data){const rs=data.results||[]
 const el=$('#oppUpdated');el.hidden=!data.scanned_at;el.textContent=data.scanned_at?`Last update ${data.scanned_at}`:''
 if(!rs.length){$('#oppList').innerHTML='<div class="empty">No opportunities yet — run a scan above.</div>';return}
 const groups=[['publish_ready','Publish-ready (score ≥ '+data.config.high_threshold+', setup checks pass)'],['watchlist','Watchlist / needs confirmation'],['low','Low priority']]
-$('#oppList').innerHTML=groups.map(([g,title])=>{const items=rs.filter(r=>r.group===g);return items.length?`<div class="opp-group">${title} (${items.length})</div><div class="signal-list">${items.map(oppCard).join('')}</div>`:''}).join('')+
+syncCompactBtn()
+$('#oppList').innerHTML=groups.map(([g,title])=>{const items=rs.filter(r=>r.group===g);return items.length?`<div class="opp-group" onclick="oppGroupToggle(this)">${title} (${items.length})</div><div class="signal-list">${items.map(oppCard).join('')}</div>`:''}).join('')+
 (data.skipped&&data.skipped.length?`<div class="opp-missing">Skipped ${data.skipped.length}: ${esc(data.skipped.slice(0,8).map(s=>s.symbol+' ('+s.reason+')').join('; '))}${data.skipped.length>8?'…':''}</div>`:'')}
+function syncCompactBtn(){const b=$('#oppCompact');if(b)b.textContent=oppCompact?'📖 Expand list':'🗜️ Shorten list'}
+// Buttons inside a card keep working; only the header row toggles it.
+window.oppToggle=(sym,ev)=>{if(ev.target.closest('button,a'))return;document.querySelector(`#oppList .signal[data-sym="${sym}"]`)?.classList.toggle('collapsed')}
+window.oppGroupToggle=el=>{el.classList.toggle('closed');el.nextElementSibling?.classList.toggle('hidden')}
+$('#oppCompact').onclick=()=>{oppCompact=!oppCompact;try{localStorage.setItem('oppCompact',oppCompact?'1':'0')}catch{}
+document.querySelectorAll('#oppList .signal').forEach(el=>el.classList.toggle('collapsed',oppCompact));
+document.querySelectorAll('#oppList .opp-group').forEach(el=>{el.classList.remove('closed');el.nextElementSibling?.classList.remove('hidden')});syncCompactBtn()}
 window.oppView=sym=>{const o=(window.oppData?.results||[]).find(r=>r.symbol===sym);if(!o)return;const el=$('#oppd-'+sym);const sg=o.signal||{}
 el.textContent=`${sym} ${sg.side} ${sg.timeframe} — entry ${sg.entry_low}–${sg.entry_high}, stop ${sg.stop_loss}, targets ${sg.tp1} / ${sg.tp2} / ${sg.tp3}, technical score ${sg.score}/95\n\nScore breakdown (unavailable parts are excluded, weights re-normalised):\n`+Object.entries(o.components).map(([k,c])=>`  ${k}: ${c.value==null?'n/a':c.value} × ${(c.effective_weight*100).toFixed(0)}% — ${c.note||''}`).join('\n')
 el.style.display=el.style.display==='none'?'block':'none'}
@@ -218,6 +226,14 @@ oppDrafts[sym]=d;oppStatus(`Draft #${d.id} created for ${sym}${d.ready?'':' (wat
 await load();renderOpps(window.oppData)}catch(x){oppStatus(x.message,'error')}}
 window.oppPreview=sym=>{const d=oppDrafts[sym];if(!d)return;const el=$('#oppp-'+sym);el.innerHTML=(d.chart_path?`<img src="/charts/${esc(d.chart_path.split('/').pop())}" alt="chart">`:'')+`<div class="preview">${esc(d.content)}</div>`}
 window.oppPost=sym=>{const d=oppDrafts[sym];if(d)window.publishPost(d.id)}
+$('#oppGenAll').onclick=async()=>{const btn=$('#oppGenAll'),scope=$('#oppScope').value;if(!window.oppData?.results?.length)return alert('Scan opportunities first')
+if(!confirm(`Create a draft (text + chart) for each opportunity in "${$('#oppScope').selectedOptions[0].text}"? Nothing is posted.`))return
+btn.disabled=true;oppStatus('Generating drafts and charts… this can take a minute.')
+try{await shareKlines(['BTCUSDT'],'1h')}catch{}
+try{const d=await post('/api/opportunities/generate-all',{scope});d.results.forEach(r=>{oppDrafts[r.symbol]=r})
+const parts=[`${d.results.length} draft${d.results.length===1?'':'s'} created of ${d.considered}`];if(d.skipped.length)parts.push(`${d.skipped.length} skipped (already posted for the same event)`);if(d.errors.length)parts.push(`${d.errors.length} failed`)
+oppStatus(parts.join(' · ')+'. Review them in Drafts before posting.'+(d.errors.length?' '+d.errors.slice(0,3).join(' | '):''),d.errors.length?'error':'success')
+await load();renderOpps(window.oppData)}catch(x){oppStatus(x.message,'error')}finally{btn.disabled=false}}
 $('#oppCancel').onclick=()=>{oppAbort=true;oppStatus('Cancelling…')}
 const post=(url,body)=>api(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
 $('#scanOpp').onclick=async()=>{const btn=$('#scanOpp'),deep=$('#oppMode').value==='all';btn.disabled=true;$('#oppCancel').hidden=false;oppAbort=false;weightLim.total=0

@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/style.css?v=4">
+<link rel="stylesheet" href="/static/style.css?v=5">
 <script>(function(){var t=localStorage.getItem('theme');if(t)document.documentElement.setAttribute('data-theme',t)})()</script>
 </head>
 <body>
@@ -68,6 +68,13 @@
     </select></label>
     <button id="scanOpp" class="primary">🔭 Scan opportunities</button>
     <button id="oppCancel" class="danger" hidden>Cancel</button>
+    <label class="field">Generate for<select id="oppScope">
+      <option value="watchlist">Publish-ready + watchlist</option>
+      <option value="ready">Publish-ready only</option>
+      <option value="all">Every ranked coin</option>
+    </select></label>
+    <button id="oppGenAll">📝 Generate all opportunities</button>
+    <button id="oppCompact" title="Show one line per coin">🗜️ Shorten list</button>
     <span id="oppUpdated" class="pill" hidden></span>
   </div>
   <div id="oppStatus" class="generate-status" hidden></div>
@@ -133,6 +140,6 @@
 
 </main>
 <script src="/static/ratelimit.js?v=1"></script>
-<script src="/static/app.js?v=5"></script>
+<script src="/static/app.js?v=7"></script>
 </body>
 </html>

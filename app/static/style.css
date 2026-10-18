@@ -462,3 +462,10 @@ pre.log {
 .opp-detail{margin-top:10px;font-size:12px;white-space:pre-wrap}
 .opp-preview{margin-top:10px}
 .opp-preview img{max-width:260px;border-radius:8px;display:block;margin-bottom:8px}
+.signal.collapsed > :not(.signal-top){display:none}
+.signal-top .chev{cursor:pointer;display:inline-block;width:1em;transition:transform .15s}
+.signal.collapsed .chev{transform:rotate(-90deg)}
+.opp-group{cursor:pointer;user-select:none}
+.opp-group.closed::after{content:' ▸'}
+.opp-group:not(.closed)::after{content:' ▾'}
+.signal-list.hidden{display:none}
